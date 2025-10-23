@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <title>FinTrack Pro</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+    const { createClient } = supabase;
+
+    const DB_NAME = 'FinTrackDB';
+    const DB_VERSION = 1;
+
+    const initDB = () => {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve(request.result);
+        request.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains('accounts')) {
+            db.createObjectStore('accounts', { keyPath: 'id', autoIncrement: true });
+          }
+          if (!db.objectStoreNames.contains('categories')) {
+            db.createObjectStore('categories', { keyPath: 'id', autoIncrement: true });
+          }
+          if (!db.objectStoreNames.contains('transactions')) {
+            db.createObjectStore('transactions', { keyPath: 'id', autoIncrement: true });
+          }
+          if (!db.objectStoreNames.contains('settings')) {
+            db.createObjectStore('settings', { keyPath: 'key' });
+          }
+        };
+      });
+    };
+
+    const dbOperation = async (storeName, mode, operation) => {
+      const db = await initDB();
+      const tx = db.transaction(storeName, mode);
+      const store = tx.objectStore(storeName);
+      return new Promise((resolve, reject) => {
+        const request = operation(store);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    };
+
+    const App = () => {
+      const [view, setView] = useState('dashboard');
+      const [accounts, setAccounts] = useState([]);
+      const [categories, setCategories] = useState([]);
+      const [transactions, setTransactions] = useState([]);
+      const [filterYear, setFilterYear] = useState(new Date().getFullYear());
+      const [filterAccount, setFilterAccount] = useState('all');
+      const [filterCategory, setFilterCategory] = useState('all');
+      const [menuOpen, setMenuOpen] = useState(false);
+      const [showModal, setShowModal] = useState(null);
+      const [editingItem, setEditingItem] = useState(null);
+      const [supabaseClient, setSupabaseClient] = useState(null);
+      const [showSupabaseSetup, setShowSupabaseSetup] = useState(true);
+
+      useEffect(() => {
+        loadData();
+        checkSupabaseConfig();
+      }, []);
+
+      const checkSupabaseConfig = async () => {
+        try {
+          const url = await dbOperation('settings', 'readonly', store => store.get('supabase_url'));
+          const key = await dbOperation('settings', 'readonly', store => store.get('supabase_key'));
+          if (url?.value && key?.value) {
+            const client = createClient(url.value, key.value);
+            setSupabaseClient(client);
+            setShowSupabaseSetup(false);
+          }
+        } catch (err) {
+          console.log('No Supabase config');
+        }
+      };
+
+      const setupSupabase = async (url, key) => {
+        try {
+          const client = createClient(url, key);
+          await dbOperation('settings', 'readwrite', store => store.put({ key: 'supabase_url', value: url }));
+          await dbOperation('settings', 'readwrite', store => store.put({ key: 'supabase_key', value: key }));
+          setSupabaseClient(client);
+          setShowSupabaseSetup(false);
+          alert('✓ Supabase configurato!');
+        } catch (err) {
+          alert('Errore configurazione Supabase');
+        }
+      };
+
+      const loadData = async () => {
+        const accs = await dbOperation('accounts', 'readonly', store => store.getAll());
+        const cats = await dbOperation('categories', 'readonly', store => store.getAll());
+        const txs = await dbOperation('transactions', 'readonly', store => store.getAll());
+        setAccounts(accs || []);
+        setCategories(cats || []);
+        setTransactions(txs || []);
+      };
+
+      const saveAccount = async (name, balance) => {
+        await dbOperation('accounts', 'readwrite', store => store.add({
+          name,
+          initialBalance: parseFloat(balance),
+          createdAt: new Date().toISOString()
+        }));
+        await loadData();
+        setShowModal(null);
+      };
+
+      const saveCategory = async (name, color) => {
+        await dbOperation('categories', 'readwrite', store => store.add({
+          name,
+          color,
+          createdAt: new Date().toISOString()
+        }));
+        await loadData();
+        setShowModal(null);
+      };
+
+      const saveTransaction = async (data) => {
+        if (editingItem) {
+          await dbOperation('transactions', 'readwrite', store => store.put({ ...data, id: editingItem.id }));
+        } else {
+          await dbOperation('transactions', 'readwrite', store => store.add(data));
+        }
+        await loadData();
+        setShowModal(null);
+        setEditingItem(null);
+      };
+
+      const deleteItem = async (type, id) => {
+        await dbOperation(type, 'readwrite', store => store.delete(id));
+        await loadData();
+        setShowModal(null);
+      };
+
+      const toggleHidden = async (tx) => {
+        await dbOperation('transactions', 'readwrite', store => store.put({ ...tx, hidden: !tx.hidden }));
+        await loadData();
+      };
+
+      const getFiltered = () => {
+        return transactions.filter(tx => {
+          const txDate = new Date(tx.date);
+          if (txDate.getFullYear() !== filterYear) return false;
+          if (tx.hidden && view !== 'hidden') return false;
+          if (filterAccount !== 'all' && tx.accountId !== parseInt(filterAccount)) return false;
+          if (filterCategory !== 'all' && tx.categoryId !== parseInt(filterCategory)) return false;
+          return true;
+        });
+      };
+
+      const getMonthlyData = () => {
+        const filtered = getFiltered();
+        const monthly = Array(12).fill(0);
+        filtered.forEach(tx => {
+          const month = new Date(tx.date).getMonth();
+          monthly[month] += tx.type === 'income' ? parseFloat(tx.amount) : -parseFloat(tx.amount);
+        });
+        return monthly;
+      };
+
+      const getSummary = () => {
+        const filtered = getFiltered();
+        let income = 0, expense = 0;
+        filtered.forEach(tx => {
+          const amt = parseFloat(tx.amount);
+          if (tx.type === 'income') income += amt;
+          else expense += amt;
+        });
+        return { income, expense, balance: income - expense };
+      };
+
+      const months = ['Gen', 'Feb', 'Mar', 'Apr', 'Mag', 'Giu', 'Lug', 'Ago', 'Set', 'Ott', 'Nov', 'Dic'];
+      const monthlyData = getMonthlyData();
+      const maxAbs = Math.max(...monthlyData.map(Math.abs), 100);
+      const summary = getSummary();
+
+      if (showSupabaseSetup) {
+        return <SupabaseSetupModal onSetup={setupSupabase} onSkip={() => setShowSupabaseSetup(false)} />;
+      }
+
+      return (
+        <div className="min-h-screen bg-gray-900 text-gray-100">
+          <header className="bg-gray-800 p-4 flex items-center justify-between sticky top-0 z-40">
+            <button onClick={() => setMenuOpen(!menuOpen)} className="p-2">☰</button>
+            <h1 className="text-xl font-bold text-blue-400">FinTrack Pro</h1>
+            <div className="w-10"></div>
+          </header>
+
+          {menuOpen && (
+            <div className="fixed inset-0 bg-gray-800 z-30 p-4 pt-20">
+              <button onClick={() => { setView('dashboard'); setMenuOpen(false); }} className="w-full text-left p-3 hover:bg-gray-700 rounded mb-2">📊 Dashboard</button>
+              <button onClick={() => { setView('hidden'); setMenuOpen(false); }} className="w-full text-left p-3 hover:bg-gray-700 rounded mb-2">👁️ Nascoste</button>
+              <button onClick={() => { setView('accounts'); setMenuOpen(false); }} className="w-full text-left p-3 hover:bg-gray-700 rounded mb-2">💳 Conti</button>
+              <button onClick={() => { setView('categories'); setMenuOpen(false); }} className="w-full text-left p-3 hover:bg-gray-700 rounded">🏷️ Categorie</button>
+            </div>
+          )}
+
+          <div className="p-4 pb-20">
+            {view === 'dashboard' && (
+              <>
+                <div className="bg-gray-800 rounded-lg p-4 mb-4">
+                  <select value={filterAccount} onChange={e => setFilterAccount(e.target.value)} className="w-full bg-gray-700 rounded p-2 mb-2">
+                    <option value="all">Tutti i conti</option>
+                    {accounts.map(acc => <option key={acc.id} value={acc.id}>{acc.name}</option>)}
+                  </select>
+                  <select value={filterCategory} onChange={e => setFilterCategory(e.target.value)} className="w-full bg-gray-700 rounded p-2 mb-2">
+                    <option value="all">Tutte categorie</option>
+                    {categories.map(cat => <option key={cat.id} value={cat.id}>{cat.name}</option>)}
+                  </select>
+                  <input type="number" value={filterYear} onChange={e => setFilterYear(parseInt(e.target.value))} className="w-full bg-gray-700 rounded p-2" />
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 mb-4">
+                  <div className="bg-gray-800 rounded p-3">
+                    <div className="text-xs text-gray-400">Entrate</div>
+                    <div className="text-lg font-bold text-green-400">+{summary.income.toFixed(2)}€</div>
+                  </div>
+                  <div className="bg-gray-800 rounded p-3">
+                    <div className="text-xs text-gray-400">Uscite</div>
+                    <div className="text-lg font-bold text-red-400">-{summary.expense.toFixed(2)}€</div>
+                  </div>
+                  <div className="bg-gray-800 rounded p-3">
+                    <div className="text-xs text-gray-400">Saldo</div>
+                    <div className={`text-lg font-bold ${summary.balance >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {summary.balance >= 0 ? '+' : ''}{summary.balance.toFixed(2)}€
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-gray-800 rounded-lg p-4 mb-4">
+                  <h2 className="font-bold mb-4">Andamento {filterYear}</h2>
+                  <div className="flex items-end gap-1 h-56">
+                    {monthlyData.map((val, idx) => {
+                      const h = maxAbs > 0 ? (Math.abs(val) / maxAbs) * 100 : 0;
+                      const pos = val >= 0;
+                      return (
+                        <div key={idx} className="flex-1 flex flex-col items-center h-full">
+                          <div className="flex-1 flex items-end w-full">
+                            {pos && val !== 0 && <div style={{height: h + '%'}} className="w-full bg-green-500 rounded-t"></div>}
+                          </div>
+                          <div className="h-0.5 w-full bg-gray-600"></div>
+                          <div className="flex-1 flex items-start w-full">
+                            {!pos && val !== 0 && <div style={{height: h + '%'}} className="w-full bg-red-500 rounded-b"></div>}
+                          </div>
+                          <div className={`text-xs mt-1 font-bold ${val === 0 ? 'text-gray-400' : pos ? 'text-green-400' : 'text-red-400'}`}>
+                            {val !== 0 ? (pos ? '+' : '') + val.toFixed(0) : '0'}€
+                          </div>
+                          <div className="text-xs text-gray-400">{months[idx]}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <button onClick={() => setShowModal('addTransaction')} className="w-full bg-blue-600 rounded p-4 font-bold mb-4">
+                  ➕ Aggiungi Transazione
+                </button>
+
+                <div className="bg-gray-800 rounded-lg p-4">
+                  <h2 className="font-bold mb-3">Transazioni</h2>
+                  {getFiltered().sort((a,b) => new Date(b.date) - new Date(a.date)).map(tx => {
+                    const acc = accounts.find(a => a.id === tx.accountId);
+                    const cat = categories.find(c => c.id === tx.categoryId);
+                    return (
+                      <div key={tx.id} className="p-3 rounded bg-gray-700 mb-2">
+                        <div className="flex justify-between mb-2">
+                          <div>
+                            <div className="text-sm text-gray-400">{tx.date}</div>
+                            <div className="font-medium">{tx.description || 'Senza descrizione'}</div>
+                            <div className="text-sm text-gray-400">{acc?.name} • {cat?.name}</div>
+                          </div>
+                          <div className={`font-bold ${tx.type === 'income' ? 'text-green-400' : 'text-red-400'}`}>
+                            {tx.type === 'income' ? '+' : '-'}{tx.amount}€
+                          </div>
+                        </div>
+                        <div className="flex gap-1 text-xs">
+                          <button onClick={() => { setEditingItem(tx); setShowModal('addTransaction'); }} className="flex-1 p-1 bg-gray-600 rounded">Modifica</button>
+                          <button onClick={() => toggleHidden(tx)} className="flex-1 p-1 bg-gray-600 rounded">Nascondi</button>
+                          <button onClick={() => setShowModal({type: 'delete', item: tx, storeName: 'transactions'})} className="flex-1 p-1 bg-red-600 rounded">Elimina</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+
+            {view === 'accounts' && (
+              <>
+                <button onClick={() => setShowModal('addAccount')} className="w-full bg-blue-600 rounded p-4 font-bold mb-4">➕ Nuovo Conto</button>
+                {accounts.map(acc => (
+                  <div key={acc.id} className="bg-gray-800 rounded p-4 flex justify-between items-center mb-2">
+                    <div>
+                      <div className="font-bold">{acc.name}</div>
+                      <div className="text-sm text-gray-400">Saldo iniziale: {acc.initialBalance}€</div>
+                    </div>
+                    <button onClick={() => setShowModal({type: 'delete', item: acc, storeName: 'accounts'})} className="p-2 bg-red-600 rounded">🗑️</button>
+                  </div>
+                ))}
+              </>
+            )}
+
+            {view === 'categories' && (
+              <>
+                <button onClick={() => setShowModal('addCategory')} className="w-full bg-blue-600 rounded p-4 font-bold mb-4">➕ Nuova Categoria</button>
+                {categories.map(cat => (
+                  <div key={cat.id} className="bg-gray-800 rounded p-4 flex justify-between items-center mb-2">
+                    <div className="flex items-center gap-3">
+                      <div className="w-4 h-4 rounded" style={{backgroundColor: cat.color}}></div>
+                      <span className="font-bold">{cat.name}</span>
+                    </div>
+                    <button onClick={() => setShowModal({type: 'delete', item: cat, storeName: 'categories'})} className="p-2 bg-red-600 rounded">🗑️</button>
+                  </div>
+                ))}
+              </>
+            )}
+
+            {view === 'hidden' && (
+              <div className="bg-gray-800 rounded-lg p-4">
+                <h2 className="font-bold mb-3">Transazioni Nascoste</h2>
+                {transactions.filter(tx => tx.hidden && new Date(tx.date).getFullYear() === filterYear).map(tx => {
+                  const acc = accounts.find(a => a.id === tx.accountId);
+                  const cat = categories.find(c => c.id === tx.categoryId);
+                  return (
+                    <div key={tx.id} className="p-3 rounded bg-gray-700/50 mb-2">
+                      <div className="flex justify-between mb-2">
+                        <div>
+                          <div className="text-sm text-gray-400">{tx.date}</div>
+                          <div className="font-medium">{tx.description || 'Senza descrizione'}</div>
+                          <div className="text-sm text-gray-400">{acc?.name} • {cat?.name}</div>
+                        </div>
+                        <div className={`font-bold ${tx.type === 'income' ? 'text-green-400' : 'text-red-400'}`}>
+                          {tx.type === 'income' ? '+' : '-'}{tx.amount}€
+                        </div>
+                      </div>
+                      <div className="flex gap-1 text-xs">
+                        <button onClick={() => toggleHidden(tx)} className="flex-1 p-1 bg-gray-600 rounded">Mostra</button>
+                        <button onClick={() => setShowModal({type: 'delete', item: tx, storeName: 'transactions'})} className="flex-1 p-1 bg-red-600 rounded">Elimina</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {showModal === 'addAccount' && <AccountModal onSave={saveAccount} onClose={() => setShowModal(null)} />}
+          {showModal === 'addCategory' && <CategoryModal onSave={saveCategory} onClose={() => setShowModal(null)} />}
+          {showModal === 'addTransaction' && <TransactionModal accounts={accounts} categories={categories} editing={editingItem} onSave={saveTransaction} onClose={() => { setShowModal(null); setEditingItem(null); }} />}
+          {showModal?.type === 'delete' && <DeleteConfirm item={showModal.item} onConfirm={() => deleteItem(showModal.storeName, showModal.item.id)} onClose={() => setShowModal(null)} />}
+        </div>
+      );
+    };
+
+    const SupabaseSetupModal = ({ onSetup, onSkip }) => {
+      const [url, setUrl] = useState('');
+      const [key, setKey] = useState('');
+      return (
+        <div className="fixed inset-0 bg-black/90 flex items-center justify-center p-4">
+          <div className="bg-gray-800 rounded-lg p-6 max-w-md">
+            <h2 className="text-2xl font-bold mb-4 text-blue-400">Setup Supabase</h2>
+            <p className="text-sm text-gray-400 mb-4">Inserisci credenziali o salta per usare solo in locale</p>
+            <input value={url} onChange={e => setUrl(e.target.value)} placeholder="Project URL" className="w-full bg-gray-700 rounded p-2 mb-2" />
+            <input value={key} onChange={e => setKey(e.target.value)} placeholder="Anon Key" className="w-full bg-gray-700 rounded p-2 mb-4" />
+            <div className="flex gap-2">
+              <button onClick={() => onSetup(url, key)} className="flex-1 bg-blue-600 rounded p-2 font-bold">Connetti</button>
+              <button onClick={onSkip} className="flex-1 bg-gray-700 rounded p-2">Salta</button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const AccountModal = ({ onSave, onClose }) => {
+      const [name, setName] = useState('');
+      const [balance, setBalance] = useState(0);
+      return (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md">
+            <h2 className="text-xl font-bold mb-4">Nuovo Conto</h2>
+            <input value={name} onChange={e => setName(e.target.value)} placeholder="Nome" className="w-full bg-gray-700 rounded p-2 mb-2" />
+            <input type="number" value={balance} onChange={e => setBalance(e.target.value)} placeholder="Saldo iniziale" className="w-full bg-gray-700 rounded p-2 mb-4" />
+            <div className="flex gap-2">
+              <button onClick={() => onSave(name, balance)} className="flex-1 bg-blue-600 rounded p-2 font-bold">Salva</button>
+              <button onClick={onClose} className="flex-1 bg-gray-700 rounded p-2">Annulla</button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const CategoryModal = ({ onSave, onClose }) => {
+      const [name, setName] = useState('');
+      const [color, setColor] = useState('#3b82f6');
+      return (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md">
+            <h2 className="text-xl font-bold mb-4">Nuova Categoria</h2>
+            <input value={name} onChange={e => setName(e.target.value)} placeholder="Nome" className="w-full bg-gray-700 rounded p-2 mb-2" />
+            <input type="color" value={color} onChange={e => setColor(e.target.value)} className="w-full bg-gray-700 rounded p-2 h-12 mb-4" />
+            <div className="flex gap-2">
+              <button onClick={() => onSave(name, color)} className="flex-1 bg-blue-600 rounded p-2 font-bold">Salva</button>
+              <button onClick={onClose} className="flex-1 bg-gray-700 rounded p-2">Annulla</button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const TransactionModal = ({ accounts, categories, editing, onSave, onClose }) => {
+      const [desc, setDesc] = useState(editing?.description || '');
+      const [accId, setAccId] = useState(editing?.accountId || '');
+      const [catId, setCatId] = useState(editing?.categoryId || '');
+      const [type, setType] = useState(editing?.type || 'expense');
+      const [amount, setAmount] = useState(editing?.amount || 0);
+      const [date, setDate] = useState(editing?.date || new Date().toISOString().split('T')[0]);
+      const [hidden, setHidden] = useState(editing?.hidden || false);
+
+      return (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md my-8">
+            <h2 className="text-xl font-bold mb-4">{editing ? 'Modifica' : 'Nuova'} Transazione</h2>
+            <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="Descrizione" className="w-full bg-gray-700 rounded p-2 mb-2" />
+            <select value={accId} onChange={e => setAccId(parseInt(e.target.value))} className="w-full bg-gray-700 rounded p-2 mb-2">
+              <option value="">Seleziona conto</option>
+              {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+            <select value={catId} onChange={e => setCatId(parseInt(e.target.value))} className="w-full bg-gray-700 rounded p-2 mb-2">
+              <option value="">Seleziona categoria</option>
+              {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            <select value={type} onChange={e => setType(e.target.value)} className="w-full bg-gray-700 rounded p-2 mb-2">
+              <option value="income">Entrata</option>
+              <option value="expense">Uscita</option>
+            </select>
+            <input type="number" step="0.01" value={amount} onChange={e => setAmount(e.target.value)} placeholder="Importo" className="w-full bg-gray-700 rounded p-2 mb-2" />
+            <input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full bg-gray-700 rounded p-2 mb-2" />
+            <label className="flex items-center gap-2 mb-4">
+              <input type="checkbox" checked={hidden} onChange={e => setHidden(e.target.checked)} />
+              <span className="text-sm">Nascondi dalle analisi</span>
+            </label>
+            <div className="flex gap-2">
+              <button onClick={() => onSave({ description: desc, accountId: accId, categoryId: catId, type, amount: parseFloat(amount), date, hidden, createdAt: editing?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() })} className="flex-1 bg-blue-600 rounded p-2 font-bold">Salva</button>
+              <button onClick={onClose} className="flex-1 bg-gray-700 rounded p-2">Annulla</button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const DeleteConfirm = ({ item, onConfirm, onClose }) => (
+      <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+        <div className="bg-gray-800 rounded-lg p-6 max-w-md">
+          <h2 className="text-xl font-bold mb-4 text-red-400">Conferma Eliminazione</h2>
+          <p className="text-gray-300 mb-6">Eliminare questo elemento?</p>
+          {item.name && <p className="text-sm text-gray-400 mb-4"><strong>{item.name}</strong></p>}
+          <div className="flex gap-2">
+            <button onClick={onConfirm} className="flex-1 bg-red-600 rounded p-2 font-bold">Elimina</button>
+            <button onClick={onClose} className="flex-1 bg-gray-700 rounded p-2">Annulla</button>
+          </div>
+        </div>
+      </div>
+    );
+
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>
