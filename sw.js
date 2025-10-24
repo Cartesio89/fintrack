@@ -1,11 +1,8 @@
-const CACHE_NAME = 'fintrack-v1';
+const CACHE_NAME = 'fintrack-v2';
 const urlsToCache = [
   './',
   './index.html',
   './manifest.json',
-  'https://unpkg.com/react@18/umd/react.production.min.js',
-  'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js',
-  'https://unpkg.com/@babel/standalone/babel.min.js',
   'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2',
   'https://cdn.tailwindcss.com'
 ];
