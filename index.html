@@ -4,7 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#1f2937">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
   <title>FinTrack Pro</title>
+  <link rel="manifest" href="manifest.json">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     * { -webkit-tap-highlight-color: transparent; }
@@ -15,6 +19,12 @@
   <div id="app"></div>
 
   <script>
+    // Register Service Worker
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js').catch(err => console.log('SW registration failed'));
+    }
+
+    const { createClient } = supabase;
     const DB_NAME = 'FinTrackDB';
     const DB_VERSION = 1;
 
@@ -28,7 +38,9 @@
       filterCategory: 'all',
       menuOpen: false,
       currentModal: null,
-      editingItem: null
+      editingItem: null,
+      supabaseClient: null,
+      showSupabaseSetup: false
     };
 
     function initDB() {
@@ -47,6 +59,9 @@
           if (!db.objectStoreNames.contains('transactions')) {
             db.createObjectStore('transactions', { keyPath: 'id', autoIncrement: true });
           }
+          if (!db.objectStoreNames.contains('settings')) {
+            db.createObjectStore('settings', { keyPath: 'key' });
+          }
         };
       });
     }
@@ -62,6 +77,33 @@
       });
     }
 
+    async function checkSupabaseConfig() {
+      try {
+        const url = await dbOperation('settings', 'readonly', store => store.get('supabase_url'));
+        const key = await dbOperation('settings', 'readonly', store => store.get('supabase_key'));
+        if (url?.value && key?.value) {
+          state.supabaseClient = createClient(url.value, key.value);
+        } else {
+          state.showSupabaseSetup = true;
+        }
+      } catch (err) {
+        state.showSupabaseSetup = true;
+      }
+    }
+
+    async function setupSupabase() {
+      const url = document.getElementById('supa-url').value.trim();
+      const key = document.getElementById('supa-key').value.trim();
+      if (url && key) {
+        state.supabaseClient = createClient(url, key);
+        await dbOperation('settings', 'readwrite', store => store.put({ key: 'supabase_url', value: url }));
+        await dbOperation('settings', 'readwrite', store => store.put({ key: 'supabase_key', value: key }));
+        state.showSupabaseSetup = false;
+        alert('✓ Supabase configurato!');
+        render();
+      }
+    }
+
     async function loadData() {
       const accs = await dbOperation('accounts', 'readonly', store => store.getAll());
       const cats = await dbOperation('categories', 'readonly', store => store.getAll());
@@ -73,6 +115,7 @@
     }
 
     async function saveAccount(name, balance) {
+      if (!name) return;
       await dbOperation('accounts', 'readwrite', store => store.add({
         name,
         initialBalance: parseFloat(balance),
@@ -83,6 +126,7 @@
     }
 
     async function saveCategory(name, color) {
+      if (!name) return;
       await dbOperation('categories', 'readwrite', store => store.add({
         name,
         color,
@@ -98,6 +142,33 @@
       } else {
         await dbOperation('transactions', 'readwrite', store => store.add(data));
       }
+      closeModal();
+      state.editingItem = null;
+      await loadData();
+    }
+
+    async function duplicateTransaction() {
+      const checkboxes = document.querySelectorAll('.month-checkbox:checked');
+      const selectedMonths = Array.from(checkboxes).map(cb => cb.value);
+      
+      if (selectedMonths.length === 0) {
+        alert('Seleziona almeno un mese');
+        return;
+      }
+
+      const tx = state.editingItem;
+      for (const yearMonth of selectedMonths) {
+        const [year, month] = yearMonth.split('-').map(Number);
+        const day = new Date(tx.date).getDate();
+        const lastDay = new Date(year, month, 0).getDate();
+        const safeDay = Math.min(day, lastDay);
+        const newDate = year + '-' + String(month).padStart(2, '0') + '-' + String(safeDay).padStart(2, '0');
+        
+        const newTx = {...tx, date: newDate, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()};
+        delete newTx.id;
+        await dbOperation('transactions', 'readwrite', store => store.add(newTx));
+      }
+      
       closeModal();
       state.editingItem = null;
       await loadData();
@@ -146,6 +217,46 @@
       return { income, expense, balance: income - expense };
     }
 
+    function exportCSV() {
+      const filtered = getFiltered();
+      const headers = ['Data', 'Descrizione', 'Conto', 'Categoria', 'Tipo', 'Importo'];
+      const rows = filtered.map(tx => {
+        const acc = state.accounts.find(a => a.id === tx.accountId);
+        const cat = state.categories.find(c => c.id === tx.categoryId);
+        return [
+          tx.date,
+          tx.description || '',
+          acc?.name || '',
+          cat?.name || '',
+          tx.type === 'income' ? 'Entrata' : 'Uscita',
+          tx.amount
+        ];
+      });
+
+      const csv = [headers, ...rows].map(row => row.join(',')).join('\\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'fintrack_' + state.filterYear + '.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function getAvailableMonths() {
+      const today = new Date();
+      const result = [];
+      const monthNames = ['Gen', 'Feb', 'Mar', 'Apr', 'Mag', 'Giu', 'Lug', 'Ago', 'Set', 'Ott', 'Nov', 'Dic'];
+      
+      for (let i = -18; i <= 18; i++) {
+        const d = new Date(today.getFullYear(), today.getMonth() + i, 1);
+        const yearMonth = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+        const label = monthNames[d.getMonth()] + ' ' + d.getFullYear();
+        result.push({ value: yearMonth, label });
+      }
+      return result;
+    }
+
     function openModal(type, item = null) {
       state.currentModal = type;
       state.editingItem = item;
@@ -170,6 +281,24 @@
       const maxAbs = Math.max(...monthlyData.map(Math.abs), 100);
       const summary = getSummary();
       const filtered = getFiltered().sort((a,b) => new Date(b.date) - new Date(a.date));
+
+      if (state.showSupabaseSetup) {
+        document.getElementById('app').innerHTML = `
+          <div class="fixed inset-0 bg-black/90 flex items-center justify-center p-4">
+            <div class="bg-gray-800 rounded-lg p-6 max-w-md w-full">
+              <h2 class="text-2xl font-bold mb-4 text-blue-400">Setup Supabase</h2>
+              <p class="text-sm text-gray-400 mb-4">Inserisci credenziali o salta per usare solo in locale</p>
+              <input id="supa-url" placeholder="Project URL" class="w-full bg-gray-700 rounded p-2 mb-2 text-sm" />
+              <input id="supa-key" placeholder="Anon Key" class="w-full bg-gray-700 rounded p-2 mb-4 text-sm" />
+              <div class="flex gap-2">
+                <button onclick="setupSupabase()" class="flex-1 bg-blue-600 hover:bg-blue-700 rounded p-2 font-bold">Connetti</button>
+                <button onclick="state.showSupabaseSetup = false; render();" class="flex-1 bg-gray-700 hover:bg-gray-600 rounded p-2">Salta</button>
+              </div>
+            </div>
+          </div>
+        `;
+        return;
+      }
 
       let html = `
         <header class="bg-gray-800 p-4 flex items-center justify-between sticky top-0 z-40 border-b border-gray-700">
@@ -201,7 +330,10 @@
               <option value="all">Tutte categorie</option>
               ${state.categories.map(cat => `<option value="${cat.id}" ${state.filterCategory == cat.id ? 'selected' : ''}>${cat.name}</option>`).join('')}
             </select>
-            <input type="number" value="${state.filterYear}" onchange="state.filterYear = parseInt(this.value); render();" class="w-full bg-gray-700 rounded p-2" />
+            <input type="number" value="${state.filterYear}" onchange="state.filterYear = parseInt(this.value); render();" class="w-full bg-gray-700 rounded p-2 mb-2" />
+            <button onclick="exportCSV()" class="w-full bg-green-600 hover:bg-green-700 rounded p-2 font-bold flex items-center justify-center gap-2">
+              📥 Esporta CSV
+            </button>
           </div>
 
           <div class="grid grid-cols-3 gap-2 mb-4">
@@ -246,7 +378,7 @@
             </div>
           </div>
 
-          <button onclick="openModal('transaction')" class="w-full bg-blue-600 rounded p-4 font-bold mb-4">➕ Aggiungi Transazione</button>
+          <button onclick="openModal('transaction')" class="w-full bg-blue-600 hover:bg-blue-700 rounded p-4 font-bold mb-4">➕ Aggiungi Transazione</button>
 
           <div class="bg-gray-800 rounded-lg p-4">
             <h2 class="font-bold mb-3">Transazioni</h2>
@@ -266,52 +398,65 @@
                     </div>
                   </div>
                   <div class="flex gap-1 text-xs">
-                    <button onclick='openModal("transaction", ${JSON.stringify(tx).replace(/'/g, "&#39;")})' class="flex-1 p-1.5 bg-gray-600 rounded">✏️</button>
-                    <button onclick='toggleHidden(${JSON.stringify(tx).replace(/'/g, "&#39;")})' class="flex-1 p-1.5 bg-gray-600 rounded">👁️</button>
-                    <button onclick="deleteItem('transactions', ${tx.id})" class="flex-1 p-1.5 bg-red-600 rounded">🗑️</button>
+                    <button onclick='openModal("transaction", ${JSON.stringify(tx).replace(/'/g, "&#39;")})' class="flex-1 p-1.5 bg-gray-600 hover:bg-gray-500 rounded">✏️</button>
+                    <button onclick='openModal("duplicate", ${JSON.stringify(tx).replace(/'/g, "&#39;")})' class="flex-1 p-1.5 bg-gray-600 hover:bg-gray-500 rounded">📋</button>
+                    <button onclick='toggleHidden(${JSON.stringify(tx).replace(/'/g, "&#39;")})' class="flex-1 p-1.5 bg-gray-600 hover:bg-gray-500 rounded">👁️</button>
+                    <button onclick="deleteItem('transactions', ${tx.id})" class="flex-1 p-1.5 bg-red-600 hover:bg-red-700 rounded">🗑️</button>
                   </div>
                 </div>
               `;
             }).join('')}
+            ${filtered.length === 0 ? '<p class="text-gray-400 text-center py-8">Nessuna transazione</p>' : ''}
           </div>
         `;
       }
 
       if (state.view === 'accounts') {
         html += `
-          <button onclick="openModal('account')" class="w-full bg-blue-600 rounded p-4 font-bold mb-4">➕ Nuovo Conto</button>
+          <button onclick="openModal('account')" class="w-full bg-blue-600 hover:bg-blue-700 rounded p-4 font-bold mb-4">➕ Nuovo Conto</button>
           ${state.accounts.map(acc => `
             <div class="bg-gray-800 rounded p-4 flex justify-between items-center mb-2">
               <div>
                 <div class="font-bold">${acc.name}</div>
                 <div class="text-sm text-gray-400">Saldo iniziale: ${acc.initialBalance}€</div>
               </div>
-              <button onclick="deleteItem('accounts', ${acc.id})" class="p-2 bg-red-600 rounded">🗑️</button>
+              <button onclick="deleteItem('accounts', ${acc.id})" class="p-2 bg-red-600 hover:bg-red-700 rounded">🗑️</button>
             </div>
           `).join('')}
+          ${state.accounts.length === 0 ? '<p class="text-gray-400 text-center py-8">Nessun conto</p>' : ''}
         `;
       }
 
       if (state.view === 'categories') {
         html += `
-          <button onclick="openModal('category')" class="w-full bg-blue-600 rounded p-4 font-bold mb-4">➕ Nuova Categoria</button>
+          <button onclick="openModal('category')" class="w-full bg-blue-600 hover:bg-blue-700 rounded p-4 font-bold mb-4">➕ Nuova Categoria</button>
           ${state.categories.map(cat => `
             <div class="bg-gray-800 rounded p-4 flex justify-between items-center mb-2">
               <div class="flex items-center gap-3">
                 <div class="w-4 h-4 rounded" style="background-color:${cat.color}"></div>
                 <span class="font-bold">${cat.name}</span>
               </div>
-              <button onclick="deleteItem('categories', ${cat.id})" class="p-2 bg-red-600 rounded">🗑️</button>
+              <button onclick="deleteItem('categories', ${cat.id})" class="p-2 bg-red-600 hover:bg-red-700 rounded">🗑️</button>
             </div>
           `).join('')}
+          ${state.categories.length === 0 ? '<p class="text-gray-400 text-center py-8">Nessuna categoria</p>' : ''}
         `;
       }
 
       if (state.view === 'hidden') {
         const hidden = state.transactions.filter(tx => tx.hidden && new Date(tx.date).getFullYear() === state.filterYear).sort((a,b) => new Date(b.date) - new Date(a.date));
+        let hiddenTotal = 0;
+        hidden.forEach(tx => {
+          hiddenTotal += tx.type === 'income' ? parseFloat(tx.amount) : -parseFloat(tx.amount);
+        });
         html += `
+          <div class="bg-gray-800 rounded-lg p-4 mb-4">
+            <h2 class="text-lg font-bold mb-2">Transazioni Nascoste ${state.filterYear}</h2>
+            <div class="text-2xl font-bold ${hiddenTotal >= 0 ? 'text-green-400' : 'text-red-400'}">
+              ${hiddenTotal >= 0 ? '+' : ''}${hiddenTotal.toFixed(2)}€
+            </div>
+          </div>
           <div class="bg-gray-800 rounded-lg p-4">
-            <h2 class="font-bold mb-3">Transazioni Nascoste</h2>
             ${hidden.map(tx => {
               const acc = state.accounts.find(a => a.id === tx.accountId);
               const cat = state.categories.find(c => c.id === tx.categoryId);
@@ -328,12 +473,14 @@
                     </div>
                   </div>
                   <div class="flex gap-1 text-xs">
+                    <button onclick='openModal("transaction", ${JSON.stringify(tx).replace(/'/g, "&#39;")})' class="flex-1 p-1.5 bg-gray-600 rounded">✏️</button>
                     <button onclick='toggleHidden(${JSON.stringify(tx).replace(/'/g, "&#39;")})' class="flex-1 p-1.5 bg-gray-600 rounded">👁️ Mostra</button>
                     <button onclick="deleteItem('transactions', ${tx.id})" class="flex-1 p-1.5 bg-red-600 rounded">🗑️</button>
                   </div>
                 </div>
               `;
             }).join('')}
+            ${hidden.length === 0 ? '<p class="text-gray-400 text-center py-8">Nessuna transazione nascosta</p>' : ''}
           </div>
         `;
       }
@@ -349,8 +496,8 @@
               <input id="acc-name" placeholder="Nome" class="w-full bg-gray-700 rounded p-2 mb-2" />
               <input id="acc-balance" type="number" value="0" placeholder="Saldo iniziale" class="w-full bg-gray-700 rounded p-2 mb-4" />
               <div class="flex gap-2">
-                <button onclick="saveAccount(document.getElementById('acc-name').value, document.getElementById('acc-balance').value)" class="flex-1 bg-blue-600 rounded p-2 font-bold">Salva</button>
-                <button onclick="closeModal()" class="flex-1 bg-gray-700 rounded p-2">Annulla</button>
+                <button onclick="saveAccount(document.getElementById('acc-name').value, document.getElementById('acc-balance').value)" class="flex-1 bg-blue-600 hover:bg-blue-700 rounded p-2 font-bold">Salva</button>
+                <button onclick="closeModal()" class="flex-1 bg-gray-700 hover:bg-gray-600 rounded p-2">Annulla</button>
               </div>
             </div>
           </div>
@@ -365,8 +512,8 @@
               <input id="cat-name" placeholder="Nome" class="w-full bg-gray-700 rounded p-2 mb-2" />
               <input id="cat-color" type="color" value="#3b82f6" class="w-full bg-gray-700 rounded p-2 h-12 mb-4" />
               <div class="flex gap-2">
-                <button onclick="saveCategory(document.getElementById('cat-name').value, document.getElementById('cat-color').value)" class="flex-1 bg-blue-600 rounded p-2 font-bold">Salva</button>
-                <button onclick="closeModal()" class="flex-1 bg-gray-700 rounded p-2">Annulla</button>
+                <button onclick="saveCategory(document.getElementById('cat-name').value, document.getElementById('cat-color').value)" class="flex-1 bg-blue-600 hover:bg-blue-700 rounded p-2 font-bold">Salva</button>
+                <button onclick="closeModal()" class="flex-1 bg-gray-700 hover:bg-gray-600 rounded p-2">Annulla</button>
               </div>
             </div>
           </div>
@@ -399,8 +546,35 @@
                 <span class="text-sm">Nascondi dalle analisi</span>
               </label>
               <div class="flex gap-2">
-                <button onclick="saveTransaction({description: document.getElementById('tx-desc').value, accountId: parseInt(document.getElementById('tx-acc').value), categoryId: parseInt(document.getElementById('tx-cat').value), type: document.getElementById('tx-type').value, amount: parseFloat(document.getElementById('tx-amount').value), date: document.getElementById('tx-date').value, hidden: document.getElementById('tx-hidden').checked, createdAt: '${editing?.createdAt || new Date().toISOString()}', updatedAt: new Date().toISOString()})" class="flex-1 bg-blue-600 rounded p-2 font-bold">Salva</button>
-                <button onclick="closeModal()" class="flex-1 bg-gray-700 rounded p-2">Annulla</button>
+                <button onclick="saveTransaction({description: document.getElementById('tx-desc').value, accountId: parseInt(document.getElementById('tx-acc').value), categoryId: parseInt(document.getElementById('tx-cat').value), type: document.getElementById('tx-type').value, amount: parseFloat(document.getElementById('tx-amount').value), date: document.getElementById('tx-date').value, hidden: document.getElementById('tx-hidden').checked, createdAt: '${editing?.createdAt || new Date().toISOString()}', updatedAt: new Date().toISOString()})" class="flex-1 bg-blue-600 hover:bg-blue-700 rounded p-2 font-bold">Salva</button>
+                <button onclick="closeModal()" class="flex-1 bg-gray-700 hover:bg-gray-600 rounded p-2">Annulla</button>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      if (state.currentModal === 'duplicate') {
+        const availableMonths = getAvailableMonths();
+        html += `
+          <div class="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50 overflow-y-auto">
+            <div class="bg-gray-800 rounded-lg p-6 w-full max-w-md my-8">
+              <h2 class="text-xl font-bold mb-4">Duplica Transazione</h2>
+              <p class="text-sm text-gray-400 mb-3">Seleziona i mesi su cui copiare questa transazione</p>
+              <div class="space-y-2 max-h-80 overflow-y-auto mb-4 bg-gray-700 rounded p-2">
+                ${availableMonths.map(m => `
+                  <label class="flex items-center gap-2 p-2 hover:bg-gray-600 rounded cursor-pointer">
+                    <input type="checkbox" value="${m.value}" class="month-checkbox w-4 h-4" />
+                    <span class="text-sm">${m.label}</span>
+                  </label>
+                `).join('')}
+              </div>
+              <div class="text-sm text-gray-400 mb-3">
+                <span id="selected-count">0</span> mese/i selezionato/i
+              </div>
+              <div class="flex gap-2">
+                <button onclick="duplicateTransaction()" class="flex-1 bg-blue-600 hover:bg-blue-700 rounded p-2 font-bold">Duplica</button>
+                <button onclick="closeModal()" class="flex-1 bg-gray-700 hover:bg-gray-600 rounded p-2">Annulla</button>
               </div>
             </div>
           </div>
@@ -408,10 +582,24 @@
       }
 
       document.getElementById('app').innerHTML = html;
+
+      // Update selected months count
+      if (state.currentModal === 'duplicate') {
+        const checkboxes = document.querySelectorAll('.month-checkbox');
+        checkboxes.forEach(cb => {
+          cb.addEventListener('change', () => {
+            const count = document.querySelectorAll('.month-checkbox:checked').length;
+            document.getElementById('selected-count').textContent = count;
+          });
+        });
+      }
     }
 
     // Init
-    loadData();
+    (async () => {
+      await checkSupabaseConfig();
+      await loadData();
+    })();
   </script>
 </body>
 </html>
