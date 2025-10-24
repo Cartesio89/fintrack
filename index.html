@@ -2,13 +2,23 @@
 <html lang="it">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1f2937">
+  <meta name="description" content="FinTrack Pro - Gestione finanze personali">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>FinTrack Pro</title>
+  <link rel="manifest" href="manifest.json">
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { -webkit-tap-highlight-color: transparent; }
+    body { overscroll-behavior-y: none; }
+  </style>
 </head>
 <body>
   <div id="root"></div>
@@ -16,6 +26,11 @@
   <script type="text/babel">
     const { useState, useEffect } = React;
     const { createClient } = supabase;
+
+    // Register Service Worker
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js').catch(() => console.log('SW failed'));
+    }
 
     const DB_NAME = 'FinTrackDB';
     const DB_VERSION = 1;
@@ -66,7 +81,7 @@
       const [showModal, setShowModal] = useState(null);
       const [editingItem, setEditingItem] = useState(null);
       const [supabaseClient, setSupabaseClient] = useState(null);
-      const [showSupabaseSetup, setShowSupabaseSetup] = useState(true);
+      const [showSupabaseSetup, setShowSupabaseSetup] = useState(false);
 
       useEffect(() => {
         loadData();
@@ -80,10 +95,11 @@
           if (url?.value && key?.value) {
             const client = createClient(url.value, key.value);
             setSupabaseClient(client);
-            setShowSupabaseSetup(false);
+          } else {
+            setShowSupabaseSetup(true);
           }
         } catch (err) {
-          console.log('No Supabase config');
+          setShowSupabaseSetup(true);
         }
       };
 
@@ -134,6 +150,29 @@
           await dbOperation('transactions', 'readwrite', store => store.put({ ...data, id: editingItem.id }));
         } else {
           await dbOperation('transactions', 'readwrite', store => store.add(data));
+        }
+        await loadData();
+        setShowModal(null);
+        setEditingItem(null);
+      };
+
+      const duplicateTransaction = async (tx, selectedMonths) => {
+        for (const yearMonth of selectedMonths) {
+          const [year, month] = yearMonth.split('-').map(Number);
+          const day = new Date(tx.date).getDate();
+          const lastDay = new Date(year, month, 0).getDate();
+          const safeDay = Math.min(day, lastDay);
+          const newDate = `${year}-${String(month).padStart(2, '0')}-${String(safeDay).padStart(2, '0')}`;
+          
+          const newTx = {
+            ...tx,
+            date: newDate,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          };
+          delete newTx.id;
+          
+          await dbOperation('transactions', 'readwrite', store => store.add(newTx));
         }
         await loadData();
         setShowModal(null);
@@ -194,8 +233,8 @@
 
       return (
         <div className="min-h-screen bg-gray-900 text-gray-100">
-          <header className="bg-gray-800 p-4 flex items-center justify-between sticky top-0 z-40">
-            <button onClick={() => setMenuOpen(!menuOpen)} className="p-2">☰</button>
+          <header className="bg-gray-800 p-4 flex items-center justify-between sticky top-0 z-40 border-b border-gray-700">
+            <button onClick={() => setMenuOpen(!menuOpen)} className="p-2 hover:bg-gray-700 rounded">☰</button>
             <h1 className="text-xl font-bold text-blue-400">FinTrack Pro</h1>
             <div className="w-10"></div>
           </header>
@@ -288,9 +327,10 @@
                           </div>
                         </div>
                         <div className="flex gap-1 text-xs">
-                          <button onClick={() => { setEditingItem(tx); setShowModal('addTransaction'); }} className="flex-1 p-1 bg-gray-600 rounded">Modifica</button>
-                          <button onClick={() => toggleHidden(tx)} className="flex-1 p-1 bg-gray-600 rounded">Nascondi</button>
-                          <button onClick={() => setShowModal({type: 'delete', item: tx, storeName: 'transactions'})} className="flex-1 p-1 bg-red-600 rounded">Elimina</button>
+                          <button onClick={() => { setEditingItem(tx); setShowModal('addTransaction'); }} className="flex-1 p-1.5 bg-gray-600 hover:bg-gray-500 rounded">✏️</button>
+                          <button onClick={() => { setEditingItem(tx); setShowModal('duplicate'); }} className="flex-1 p-1.5 bg-gray-600 hover:bg-gray-500 rounded">📋</button>
+                          <button onClick={() => toggleHidden(tx)} className="flex-1 p-1.5 bg-gray-600 hover:bg-gray-500 rounded">👁️</button>
+                          <button onClick={() => setShowModal({type: 'delete', item: tx, storeName: 'transactions'})} className="flex-1 p-1.5 bg-red-600 hover:bg-red-700 rounded">🗑️</button>
                         </div>
                       </div>
                     );
@@ -332,7 +372,7 @@
             {view === 'hidden' && (
               <div className="bg-gray-800 rounded-lg p-4">
                 <h2 className="font-bold mb-3">Transazioni Nascoste</h2>
-                {transactions.filter(tx => tx.hidden && new Date(tx.date).getFullYear() === filterYear).map(tx => {
+                {transactions.filter(tx => tx.hidden && new Date(tx.date).getFullYear() === filterYear).sort((a,b) => new Date(b.date) - new Date(a.date)).map(tx => {
                   const acc = accounts.find(a => a.id === tx.accountId);
                   const cat = categories.find(c => c.id === tx.categoryId);
                   return (
@@ -348,8 +388,9 @@
                         </div>
                       </div>
                       <div className="flex gap-1 text-xs">
-                        <button onClick={() => toggleHidden(tx)} className="flex-1 p-1 bg-gray-600 rounded">Mostra</button>
-                        <button onClick={() => setShowModal({type: 'delete', item: tx, storeName: 'transactions'})} className="flex-1 p-1 bg-red-600 rounded">Elimina</button>
+                        <button onClick={() => { setEditingItem(tx); setShowModal('addTransaction'); }} className="flex-1 p-1.5 bg-gray-600 rounded">✏️</button>
+                        <button onClick={() => toggleHidden(tx)} className="flex-1 p-1.5 bg-gray-600 rounded">👁️ Mostra</button>
+                        <button onClick={() => setShowModal({type: 'delete', item: tx, storeName: 'transactions'})} className="flex-1 p-1.5 bg-red-600 rounded">🗑️</button>
                       </div>
                     </div>
                   );
@@ -361,6 +402,7 @@
           {showModal === 'addAccount' && <AccountModal onSave={saveAccount} onClose={() => setShowModal(null)} />}
           {showModal === 'addCategory' && <CategoryModal onSave={saveCategory} onClose={() => setShowModal(null)} />}
           {showModal === 'addTransaction' && <TransactionModal accounts={accounts} categories={categories} editing={editingItem} onSave={saveTransaction} onClose={() => { setShowModal(null); setEditingItem(null); }} />}
+          {showModal === 'duplicate' && <DuplicateModal tx={editingItem} onDuplicate={duplicateTransaction} onClose={() => { setShowModal(null); setEditingItem(null); }} />}
           {showModal?.type === 'delete' && <DeleteConfirm item={showModal.item} onConfirm={() => deleteItem(showModal.storeName, showModal.item.id)} onClose={() => setShowModal(null)} />}
         </div>
       );
@@ -371,14 +413,14 @@
       const [key, setKey] = useState('');
       return (
         <div className="fixed inset-0 bg-black/90 flex items-center justify-center p-4">
-          <div className="bg-gray-800 rounded-lg p-6 max-w-md">
+          <div className="bg-gray-800 rounded-lg p-6 max-w-md w-full">
             <h2 className="text-2xl font-bold mb-4 text-blue-400">Setup Supabase</h2>
             <p className="text-sm text-gray-400 mb-4">Inserisci credenziali o salta per usare solo in locale</p>
-            <input value={url} onChange={e => setUrl(e.target.value)} placeholder="Project URL" className="w-full bg-gray-700 rounded p-2 mb-2" />
-            <input value={key} onChange={e => setKey(e.target.value)} placeholder="Anon Key" className="w-full bg-gray-700 rounded p-2 mb-4" />
+            <input value={url} onChange={e => setUrl(e.target.value)} placeholder="Project URL" className="w-full bg-gray-700 rounded p-2 mb-2 text-sm" />
+            <input value={key} onChange={e => setKey(e.target.value)} placeholder="Anon Key" className="w-full bg-gray-700 rounded p-2 mb-4 text-sm" />
             <div className="flex gap-2">
-              <button onClick={() => onSetup(url, key)} className="flex-1 bg-blue-600 rounded p-2 font-bold">Connetti</button>
-              <button onClick={onSkip} className="flex-1 bg-gray-700 rounded p-2">Salta</button>
+              <button onClick={() => onSetup(url, key)} className="flex-1 bg-blue-600 hover:bg-blue-700 rounded p-2 font-bold">Connetti</button>
+              <button onClick={onSkip} className="flex-1 bg-gray-700 hover:bg-gray-600 rounded p-2">Salta</button>
             </div>
           </div>
         </div>
@@ -395,7 +437,7 @@
             <input value={name} onChange={e => setName(e.target.value)} placeholder="Nome" className="w-full bg-gray-700 rounded p-2 mb-2" />
             <input type="number" value={balance} onChange={e => setBalance(e.target.value)} placeholder="Saldo iniziale" className="w-full bg-gray-700 rounded p-2 mb-4" />
             <div className="flex gap-2">
-              <button onClick={() => onSave(name, balance)} className="flex-1 bg-blue-600 rounded p-2 font-bold">Salva</button>
+              <button onClick={() => name && onSave(name, balance)} className="flex-1 bg-blue-600 rounded p-2 font-bold">Salva</button>
               <button onClick={onClose} className="flex-1 bg-gray-700 rounded p-2">Annulla</button>
             </div>
           </div>
@@ -413,7 +455,7 @@
             <input value={name} onChange={e => setName(e.target.value)} placeholder="Nome" className="w-full bg-gray-700 rounded p-2 mb-2" />
             <input type="color" value={color} onChange={e => setColor(e.target.value)} className="w-full bg-gray-700 rounded p-2 h-12 mb-4" />
             <div className="flex gap-2">
-              <button onClick={() => onSave(name, color)} className="flex-1 bg-blue-600 rounded p-2 font-bold">Salva</button>
+              <button onClick={() => name && onSave(name, color)} className="flex-1 bg-blue-600 rounded p-2 font-bold">Salva</button>
               <button onClick={onClose} className="flex-1 bg-gray-700 rounded p-2">Annulla</button>
             </div>
           </div>
@@ -434,49 +476,17 @@
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50 overflow-y-auto">
           <div className="bg-gray-800 rounded-lg p-6 w-full max-w-md my-8">
             <h2 className="text-xl font-bold mb-4">{editing ? 'Modifica' : 'Nuova'} Transazione</h2>
-            <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="Descrizione" className="w-full bg-gray-700 rounded p-2 mb-2" />
-            <select value={accId} onChange={e => setAccId(parseInt(e.target.value))} className="w-full bg-gray-700 rounded p-2 mb-2">
+            <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="Descrizione" className="w-full bg-gray-700 rounded p-2 mb-2 text-sm" />
+            <select value={accId} onChange={e => setAccId(parseInt(e.target.value))} className="w-full bg-gray-700 rounded p-2 mb-2 text-sm">
               <option value="">Seleziona conto</option>
               {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
             </select>
-            <select value={catId} onChange={e => setCatId(parseInt(e.target.value))} className="w-full bg-gray-700 rounded p-2 mb-2">
+            <select value={catId} onChange={e => setCatId(parseInt(e.target.value))} className="w-full bg-gray-700 rounded p-2 mb-2 text-sm">
               <option value="">Seleziona categoria</option>
               {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
-            <select value={type} onChange={e => setType(e.target.value)} className="w-full bg-gray-700 rounded p-2 mb-2">
+            <select value={type} onChange={e => setType(e.target.value)} className="w-full bg-gray-700 rounded p-2 mb-2 text-sm">
               <option value="income">Entrata</option>
               <option value="expense">Uscita</option>
             </select>
-            <input type="number" step="0.01" value={amount} onChange={e => setAmount(e.target.value)} placeholder="Importo" className="w-full bg-gray-700 rounded p-2 mb-2" />
-            <input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full bg-gray-700 rounded p-2 mb-2" />
-            <label className="flex items-center gap-2 mb-4">
-              <input type="checkbox" checked={hidden} onChange={e => setHidden(e.target.checked)} />
-              <span className="text-sm">Nascondi dalle analisi</span>
-            </label>
-            <div className="flex gap-2">
-              <button onClick={() => onSave({ description: desc, accountId: accId, categoryId: catId, type, amount: parseFloat(amount), date, hidden, createdAt: editing?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() })} className="flex-1 bg-blue-600 rounded p-2 font-bold">Salva</button>
-              <button onClick={onClose} className="flex-1 bg-gray-700 rounded p-2">Annulla</button>
-            </div>
-          </div>
-        </div>
-      );
-    };
-
-    const DeleteConfirm = ({ item, onConfirm, onClose }) => (
-      <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
-        <div className="bg-gray-800 rounded-lg p-6 max-w-md">
-          <h2 className="text-xl font-bold mb-4 text-red-400">Conferma Eliminazione</h2>
-          <p className="text-gray-300 mb-6">Eliminare questo elemento?</p>
-          {item.name && <p className="text-sm text-gray-400 mb-4"><strong>{item.name}</strong></p>}
-          <div className="flex gap-2">
-            <button onClick={onConfirm} className="flex-1 bg-red-600 rounded p-2 font-bold">Elimina</button>
-            <button onClick={onClose} className="flex-1 bg-gray-700 rounded p-2">Annulla</button>
-          </div>
-        </div>
-      </div>
-    );
-
-    ReactDOM.render(<App />, document.getElementById('root'));
-  </script>
-</body>
-</html>
+            <input type="number" step="0.01" value={amount} onChange={e => setAmount(e.target.value)} placeholder="Importo
