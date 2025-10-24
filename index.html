@@ -121,28 +121,51 @@
       render();
 
       try {
-        // Upload accounts
-        for (const acc of state.accounts) {
+        // Get all local data
+        const localAccounts = state.accounts;
+        const localCategories = state.categories;
+        const localTransactions = state.transactions;
+
+        // Get all cloud data
+        const { data: cloudAccounts } = await state.supabaseClient.from('accounts').select('*');
+        const { data: cloudCategories } = await state.supabaseClient.from('categories').select('*');
+        const { data: cloudTransactions } = await state.supabaseClient.from('transactions').select('*');
+
+        // Sync accounts
+        const cloudAccountIds = new Set((cloudAccounts || []).map(a => a.id));
+        for (const acc of localAccounts) {
           await state.supabaseClient.from('accounts').upsert({
             id: acc.id,
             name: acc.name,
             initial_balance: acc.initialBalance,
             created_at: acc.createdAt
           });
+          cloudAccountIds.delete(acc.id);
+        }
+        // Delete from cloud what's not in local
+        for (const id of cloudAccountIds) {
+          await state.supabaseClient.from('accounts').delete().eq('id', id);
         }
 
-        // Upload categories
-        for (const cat of state.categories) {
+        // Sync categories
+        const cloudCategoryIds = new Set((cloudCategories || []).map(c => c.id));
+        for (const cat of localCategories) {
           await state.supabaseClient.from('categories').upsert({
             id: cat.id,
             name: cat.name,
             color: cat.color,
             created_at: cat.createdAt
           });
+          cloudCategoryIds.delete(cat.id);
+        }
+        // Delete from cloud what's not in local
+        for (const id of cloudCategoryIds) {
+          await state.supabaseClient.from('categories').delete().eq('id', id);
         }
 
-        // Upload transactions
-        for (const tx of state.transactions) {
+        // Sync transactions
+        const cloudTxIds = new Set((cloudTransactions || []).map(t => t.id));
+        for (const tx of localTransactions) {
           await state.supabaseClient.from('transactions').upsert({
             id: tx.id,
             description: tx.description,
@@ -155,14 +178,19 @@
             created_at: tx.createdAt,
             updated_at: tx.updatedAt
           });
+          cloudTxIds.delete(tx.id);
+        }
+        // Delete from cloud what's not in local
+        for (const id of cloudTxIds) {
+          await state.supabaseClient.from('transactions').delete().eq('id', id);
         }
 
         state.lastSync = new Date();
         await dbOperation('settings', 'readwrite', store => store.put({ key: 'last_sync', value: state.lastSync.toISOString() }));
-        showNotification('✓ Dati caricati su cloud');
+        showNotification('✓ Dati sincronizzati con cloud');
       } catch (err) {
         console.error('Sync error:', err);
-        showNotification('✗ Errore caricamento cloud');
+        showNotification('✗ Errore sincronizzazione');
       }
 
       state.syncing = false;
@@ -179,10 +207,28 @@
         const { data: categories } = await state.supabaseClient.from('categories').select('*');
         const { data: transactions } = await state.supabaseClient.from('transactions').select('*');
 
-        // Save to IndexedDB
+        // Clear local IndexedDB
+        const db = await initDB();
+        await new Promise((resolve) => {
+          const txAccounts = db.transaction('accounts', 'readwrite');
+          txAccounts.objectStore('accounts').clear();
+          txAccounts.oncomplete = resolve;
+        });
+        await new Promise((resolve) => {
+          const txCategories = db.transaction('categories', 'readwrite');
+          txCategories.objectStore('categories').clear();
+          txCategories.oncomplete = resolve;
+        });
+        await new Promise((resolve) => {
+          const txTransactions = db.transaction('transactions', 'readwrite');
+          txTransactions.objectStore('transactions').clear();
+          txTransactions.oncomplete = resolve;
+        });
+
+        // Save cloud data to local
         if (accounts) {
           for (const acc of accounts) {
-            await dbOperation('accounts', 'readwrite', store => store.put({
+            await dbOperation('accounts', 'readwrite', store => store.add({
               id: acc.id,
               name: acc.name,
               initialBalance: acc.initial_balance,
@@ -193,7 +239,7 @@
 
         if (categories) {
           for (const cat of categories) {
-            await dbOperation('categories', 'readwrite', store => store.put({
+            await dbOperation('categories', 'readwrite', store => store.add({
               id: cat.id,
               name: cat.name,
               color: cat.color,
@@ -204,7 +250,7 @@
 
         if (transactions) {
           for (const tx of transactions) {
-            await dbOperation('transactions', 'readwrite', store => store.put({
+            await dbOperation('transactions', 'readwrite', store => store.add({
               id: tx.id,
               description: tx.description,
               accountId: tx.account_id,
