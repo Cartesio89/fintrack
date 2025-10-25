@@ -417,7 +417,9 @@
       await dbOperation('accounts', 'readwrite', store => store.add({
         name,
         initialBalance: parseFloat(balance),
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        deleted: false
       }));
       closeModal();
       await loadData();
@@ -433,7 +435,9 @@
       await dbOperation('categories', 'readwrite', store => store.add({
         name,
         color,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        deleted: false
       }));
       closeModal();
       await loadData();
@@ -445,9 +449,13 @@
     }
 
     async function saveTransaction(data) {
+      data.updated_at = new Date().toISOString();
+      data.deleted = false;
+      
       if (state.editingItem) {
         await dbOperation('transactions', 'readwrite', store => store.put({...data, id: state.editingItem.id}));
       } else {
+        data.createdAt = new Date().toISOString();
         await dbOperation('transactions', 'readwrite', store => store.add(data));
       }
       closeModal();
