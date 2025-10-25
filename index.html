@@ -116,7 +116,7 @@
     }
 
     async function syncToCloud() {
-      if (!state.supabaseClient || state.syncing) return;
+      if (!state.supabaseClient || state.syncing || !navigator.onLine) return;
       state.syncing = true;
       render();
 
@@ -187,10 +187,10 @@
 
         state.lastSync = new Date();
         await dbOperation('settings', 'readwrite', store => store.put({ key: 'last_sync', value: state.lastSync.toISOString() }));
-        showNotification('✓ Dati sincronizzati con cloud');
+        showNotification('✓ Sincronizzato con cloud');
       } catch (err) {
         console.error('Sync error:', err);
-        showNotification('✗ Errore sincronizzazione');
+        showNotification('✗ Errore sincronizzazione cloud');
       }
 
       state.syncing = false;
@@ -198,7 +198,7 @@
     }
 
     async function syncFromCloud() {
-      if (!state.supabaseClient || state.syncing) return;
+      if (!state.supabaseClient || state.syncing || !navigator.onLine) return;
       state.syncing = true;
       render();
 
@@ -271,7 +271,7 @@
         showNotification('✓ Dati scaricati da cloud');
       } catch (err) {
         console.error('Sync error:', err);
-        showNotification('✗ Errore download da cloud');
+        showNotification('✗ Errore download cloud');
       }
 
       state.syncing = false;
@@ -305,7 +305,11 @@
       }));
       closeModal();
       await loadData();
-      if (state.supabaseClient) await syncToCloud();
+      if (state.supabaseClient && navigator.onLine) {
+        await syncToCloud();
+      } else if (!navigator.onLine) {
+        showNotification('💾 Salvato in locale (sync al prossimo online)');
+      }
     }
 
     async function saveCategory(name, color) {
@@ -317,7 +321,11 @@
       }));
       closeModal();
       await loadData();
-      if (state.supabaseClient) await syncToCloud();
+      if (state.supabaseClient && navigator.onLine) {
+        await syncToCloud();
+      } else if (!navigator.onLine) {
+        showNotification('💾 Salvato in locale (sync al prossimo online)');
+      }
     }
 
     async function saveTransaction(data) {
@@ -329,7 +337,11 @@
       closeModal();
       state.editingItem = null;
       await loadData();
-      if (state.supabaseClient) await syncToCloud();
+      if (state.supabaseClient && navigator.onLine) {
+        await syncToCloud();
+      } else if (!navigator.onLine) {
+        showNotification('💾 Salvato in locale (sync al prossimo online)');
+      }
     }
 
     async function duplicateTransaction() {
@@ -357,20 +369,32 @@
       closeModal();
       state.editingItem = null;
       await loadData();
-      if (state.supabaseClient) await syncToCloud();
+      if (state.supabaseClient && navigator.onLine) {
+        await syncToCloud();
+      } else if (!navigator.onLine) {
+        showNotification('💾 Salvato in locale (sync al prossimo online)');
+      }
     }
 
     async function deleteItem(storeName, id) {
       if (!confirm('Eliminare questo elemento?')) return;
       await dbOperation(storeName, 'readwrite', store => store.delete(id));
       await loadData();
-      if (state.supabaseClient) await syncToCloud();
+      if (state.supabaseClient && navigator.onLine) {
+        await syncToCloud();
+      } else if (!navigator.onLine) {
+        showNotification('💾 Eliminato in locale (sync al prossimo online)');
+      }
     }
 
     async function toggleHidden(tx) {
       await dbOperation('transactions', 'readwrite', store => store.put({...tx, hidden: !tx.hidden}));
       await loadData();
-      if (state.supabaseClient) await syncToCloud();
+      if (state.supabaseClient && navigator.onLine) {
+        await syncToCloud();
+      } else if (!navigator.onLine) {
+        showNotification('💾 Modificato in locale (sync al prossimo online)');
+      }
     }
 
     function getFiltered() {
