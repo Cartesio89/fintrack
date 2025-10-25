@@ -91,7 +91,7 @@
           
           // Auto-sync all'avvio se online
           if (navigator.onLine) {
-            await syncFromCloud();
+            await syncBidirectional();
           }
         } else {
           state.showSupabaseSetup = true;
@@ -110,63 +110,88 @@
         await dbOperation('settings', 'readwrite', store => store.put({ key: 'supabase_key', value: key }));
         state.showSupabaseSetup = false;
         alert('✓ Supabase configurato!');
-        await syncFromCloud();
+        await syncBidirectional();
         render();
       }
     }
 
-    async function syncToCloud() {
+    async function syncBidirectional() {
       if (!state.supabaseClient || state.syncing || !navigator.onLine) return;
       state.syncing = true;
       render();
 
       try {
-        // Get all local data
-        const localAccounts = state.accounts;
-        const localCategories = state.categories;
-        const localTransactions = state.transactions;
+        // Get local data
+        const localAccounts = await dbOperation('accounts', 'readonly', store => store.getAll());
+        const localCategories = await dbOperation('categories', 'readonly', store => store.getAll());
+        const localTransactions = await dbOperation('transactions', 'readonly', store => store.getAll());
 
-        // Get all cloud data
+        // Get cloud data
         const { data: cloudAccounts } = await state.supabaseClient.from('accounts').select('*');
         const { data: cloudCategories } = await state.supabaseClient.from('categories').select('*');
         const { data: cloudTransactions } = await state.supabaseClient.from('transactions').select('*');
 
-        // Sync accounts
-        const cloudAccountIds = new Set((cloudAccounts || []).map(a => a.id));
+        // MERGE ACCOUNTS
+        const mergedAccounts = new Map();
+        
+        // Add all local accounts
         for (const acc of localAccounts) {
-          await state.supabaseClient.from('accounts').upsert({
+          mergedAccounts.set(acc.id, {
             id: acc.id,
             name: acc.name,
             initial_balance: acc.initialBalance,
-            created_at: acc.createdAt
+            created_at: acc.createdAt,
+            source: 'local'
           });
-          cloudAccountIds.delete(acc.id);
         }
-        // Delete from cloud what's not in local
-        for (const id of cloudAccountIds) {
-          await state.supabaseClient.from('accounts').delete().eq('id', id);
+        
+        // Merge with cloud accounts (keep most recent or add new)
+        for (const acc of (cloudAccounts || [])) {
+          const local = mergedAccounts.get(acc.id);
+          if (!local) {
+            // New from cloud, add it
+            mergedAccounts.set(acc.id, {
+              id: acc.id,
+              name: acc.name,
+              initial_balance: acc.initial_balance,
+              created_at: acc.created_at,
+              source: 'cloud'
+            });
+          }
+          // If exists locally, keep local version (local is source of truth)
         }
 
-        // Sync categories
-        const cloudCategoryIds = new Set((cloudCategories || []).map(c => c.id));
+        // MERGE CATEGORIES
+        const mergedCategories = new Map();
+        
         for (const cat of localCategories) {
-          await state.supabaseClient.from('categories').upsert({
+          mergedCategories.set(cat.id, {
             id: cat.id,
             name: cat.name,
             color: cat.color,
-            created_at: cat.createdAt
+            created_at: cat.createdAt,
+            source: 'local'
           });
-          cloudCategoryIds.delete(cat.id);
         }
-        // Delete from cloud what's not in local
-        for (const id of cloudCategoryIds) {
-          await state.supabaseClient.from('categories').delete().eq('id', id);
+        
+        for (const cat of (cloudCategories || [])) {
+          const local = mergedCategories.get(cat.id);
+          if (!local) {
+            mergedCategories.set(cat.id, {
+              id: cat.id,
+              name: cat.name,
+              color: cat.color,
+              created_at: cat.created_at,
+              source: 'cloud'
+            });
+          }
         }
 
-        // Sync transactions
-        const cloudTxIds = new Set((cloudTransactions || []).map(t => t.id));
+        // MERGE TRANSACTIONS (with updated_at comparison)
+        const mergedTransactions = new Map();
+        
         for (const tx of localTransactions) {
-          await state.supabaseClient.from('transactions').upsert({
+          mergedTransactions.set(tx.id, {
             id: tx.id,
             description: tx.description,
             account_id: tx.accountId,
@@ -176,59 +201,113 @@
             date: tx.date,
             hidden: tx.hidden,
             created_at: tx.createdAt,
-            updated_at: tx.updatedAt
+            updated_at: tx.updatedAt,
+            source: 'local'
           });
-          cloudTxIds.delete(tx.id);
         }
-        // Delete from cloud what's not in local
-        for (const id of cloudTxIds) {
-          await state.supabaseClient.from('transactions').delete().eq('id', id);
+        
+        for (const tx of (cloudTransactions || [])) {
+          const local = mergedTransactions.get(tx.id);
+          if (!local) {
+            // New from cloud
+            mergedTransactions.set(tx.id, {
+              id: tx.id,
+              description: tx.description,
+              account_id: tx.account_id,
+              category_id: tx.category_id,
+              type: tx.type,
+              amount: tx.amount,
+              date: tx.date,
+              hidden: tx.hidden,
+              created_at: tx.created_at,
+              updated_at: tx.updated_at,
+              source: 'cloud'
+            });
+          } else {
+            // Exists in both - compare updated_at
+            const localDate = new Date(local.updated_at || local.created_at);
+            const cloudDate = new Date(tx.updated_at || tx.created_at);
+            
+            if (cloudDate > localDate) {
+              // Cloud is newer, use cloud version
+              mergedTransactions.set(tx.id, {
+                id: tx.id,
+                description: tx.description,
+                account_id: tx.account_id,
+                category_id: tx.category_id,
+                type: tx.type,
+                amount: tx.amount,
+                date: tx.date,
+                hidden: tx.hidden,
+                created_at: tx.created_at,
+                updated_at: tx.updated_at,
+                source: 'cloud-newer'
+              });
+            }
+            // else: local is newer or same, keep local
+          }
         }
 
-        state.lastSync = new Date();
-        await dbOperation('settings', 'readwrite', store => store.put({ key: 'last_sync', value: state.lastSync.toISOString() }));
-        showNotification('✓ Sincronizzato con cloud');
-      } catch (err) {
-        console.error('Sync error:', err);
-        showNotification('✗ Errore sincronizzazione cloud');
-      }
+        // SAVE MERGED DATA TO CLOUD
+        for (const acc of mergedAccounts.values()) {
+          await state.supabaseClient.from('accounts').upsert({
+            id: acc.id,
+            name: acc.name,
+            initial_balance: acc.initial_balance,
+            created_at: acc.created_at
+          });
+        }
 
-      state.syncing = false;
-      render();
-    }
+        for (const cat of mergedCategories.values()) {
+          await state.supabaseClient.from('categories').upsert({
+            id: cat.id,
+            name: cat.name,
+            color: cat.color,
+            created_at: cat.created_at
+          });
+        }
 
-    async function syncFromCloud() {
-      if (!state.supabaseClient || state.syncing || !navigator.onLine) return;
-      state.syncing = true;
-      render();
+        for (const tx of mergedTransactions.values()) {
+          await state.supabaseClient.from('transactions').upsert({
+            id: tx.id,
+            description: tx.description,
+            account_id: tx.account_id,
+            category_id: tx.category_id,
+            type: tx.type,
+            amount: tx.amount,
+            date: tx.date,
+            hidden: tx.hidden,
+            created_at: tx.created_at,
+            updated_at: tx.updated_at
+          });
+        }
 
-      try {
-        const { data: accounts } = await state.supabaseClient.from('accounts').select('*');
-        const { data: categories } = await state.supabaseClient.from('categories').select('*');
-        const { data: transactions } = await state.supabaseClient.from('transactions').select('*');
+        // Delete from cloud what's not in merged (deleted locally)
+        const mergedAccountIds = new Set(mergedAccounts.keys());
+        for (const acc of (cloudAccounts || [])) {
+          if (!mergedAccountIds.has(acc.id)) {
+            await state.supabaseClient.from('accounts').delete().eq('id', acc.id);
+          }
+        }
 
-        // Clear local IndexedDB
-        const db = await initDB();
-        await new Promise((resolve) => {
-          const txAccounts = db.transaction('accounts', 'readwrite');
-          txAccounts.objectStore('accounts').clear();
-          txAccounts.oncomplete = resolve;
-        });
-        await new Promise((resolve) => {
-          const txCategories = db.transaction('categories', 'readwrite');
-          txCategories.objectStore('categories').clear();
-          txCategories.oncomplete = resolve;
-        });
-        await new Promise((resolve) => {
-          const txTransactions = db.transaction('transactions', 'readwrite');
-          txTransactions.objectStore('transactions').clear();
-          txTransactions.oncomplete = resolve;
-        });
+        const mergedCategoryIds = new Set(mergedCategories.keys());
+        for (const cat of (cloudCategories || [])) {
+          if (!mergedCategoryIds.has(cat.id)) {
+            await state.supabaseClient.from('categories').delete().eq('id', cat.id);
+          }
+        }
 
-        // Save cloud data to local
-        if (accounts) {
-          for (const acc of accounts) {
-            await dbOperation('accounts', 'readwrite', store => store.add({
+        const mergedTxIds = new Set(mergedTransactions.keys());
+        for (const tx of (cloudTransactions || [])) {
+          if (!mergedTxIds.has(tx.id)) {
+            await state.supabaseClient.from('transactions').delete().eq('id', tx.id);
+          }
+        }
+
+        // SAVE MERGED DATA TO LOCAL (update with cloud changes)
+        for (const acc of mergedAccounts.values()) {
+          if (acc.source === 'cloud' || acc.source === 'cloud-newer') {
+            await dbOperation('accounts', 'readwrite', store => store.put({
               id: acc.id,
               name: acc.name,
               initialBalance: acc.initial_balance,
@@ -237,9 +316,9 @@
           }
         }
 
-        if (categories) {
-          for (const cat of categories) {
-            await dbOperation('categories', 'readwrite', store => store.add({
+        for (const cat of mergedCategories.values()) {
+          if (cat.source === 'cloud' || cat.source === 'cloud-newer') {
+            await dbOperation('categories', 'readwrite', store => store.put({
               id: cat.id,
               name: cat.name,
               color: cat.color,
@@ -248,9 +327,9 @@
           }
         }
 
-        if (transactions) {
-          for (const tx of transactions) {
-            await dbOperation('transactions', 'readwrite', store => store.add({
+        for (const tx of mergedTransactions.values()) {
+          if (tx.source === 'cloud' || tx.source === 'cloud-newer') {
+            await dbOperation('transactions', 'readwrite', store => store.put({
               id: tx.id,
               description: tx.description,
               accountId: tx.account_id,
@@ -268,10 +347,10 @@
         state.lastSync = new Date();
         await dbOperation('settings', 'readwrite', store => store.put({ key: 'last_sync', value: state.lastSync.toISOString() }));
         await loadData();
-        showNotification('✓ Dati scaricati da cloud');
+        showNotification('✓ Sincronizzazione completa');
       } catch (err) {
         console.error('Sync error:', err);
-        showNotification('✗ Errore download cloud');
+        showNotification('✗ Errore sincronizzazione');
       }
 
       state.syncing = false;
@@ -306,7 +385,7 @@
       closeModal();
       await loadData();
       if (state.supabaseClient && navigator.onLine) {
-        await syncToCloud();
+        await syncBidirectional();
       } else if (!navigator.onLine) {
         showNotification('💾 Salvato in locale (sync al prossimo online)');
       }
@@ -322,7 +401,7 @@
       closeModal();
       await loadData();
       if (state.supabaseClient && navigator.onLine) {
-        await syncToCloud();
+        await syncBidirectional();
       } else if (!navigator.onLine) {
         showNotification('💾 Salvato in locale (sync al prossimo online)');
       }
@@ -338,7 +417,7 @@
       state.editingItem = null;
       await loadData();
       if (state.supabaseClient && navigator.onLine) {
-        await syncToCloud();
+        await syncBidirectional();
       } else if (!navigator.onLine) {
         showNotification('💾 Salvato in locale (sync al prossimo online)');
       }
@@ -370,7 +449,7 @@
       state.editingItem = null;
       await loadData();
       if (state.supabaseClient && navigator.onLine) {
-        await syncToCloud();
+        await syncBidirectional();
       } else if (!navigator.onLine) {
         showNotification('💾 Salvato in locale (sync al prossimo online)');
       }
@@ -381,7 +460,7 @@
       await dbOperation(storeName, 'readwrite', store => store.delete(id));
       await loadData();
       if (state.supabaseClient && navigator.onLine) {
-        await syncToCloud();
+        await syncBidirectional();
       } else if (!navigator.onLine) {
         showNotification('💾 Eliminato in locale (sync al prossimo online)');
       }
@@ -391,7 +470,7 @@
       await dbOperation('transactions', 'readwrite', store => store.put({...tx, hidden: !tx.hidden}));
       await loadData();
       if (state.supabaseClient && navigator.onLine) {
-        await syncToCloud();
+        await syncBidirectional();
       } else if (!navigator.onLine) {
         showNotification('💾 Modificato in locale (sync al prossimo online)');
       }
@@ -517,7 +596,7 @@
           <button onclick="state.menuOpen = !state.menuOpen; render();" class="p-2 hover:bg-gray-700 rounded">☰</button>
           <h1 class="text-xl font-bold text-blue-400">FinTrack Pro</h1>
           ${state.supabaseClient ? `
-            <button onclick="syncFromCloud()" class="p-2 hover:bg-gray-700 rounded ${state.syncing ? 'opacity-50' : ''}" ${state.syncing ? 'disabled' : ''}>
+            <button onclick="syncBidirectional()" class="p-2 hover:bg-gray-700 rounded ${state.syncing ? 'opacity-50' : ''}" ${state.syncing ? 'disabled' : ''}>
               ${state.syncing ? '⟳' : '🔄'}
             </button>
           ` : '<div class="w-10"></div>'}
