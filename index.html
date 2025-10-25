@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="it">
 <head>
@@ -122,10 +121,10 @@
       render();
 
       try {
-        // Get local data
-        const localAccounts = await dbOperation('accounts', 'readonly', store => store.getAll());
-        const localCategories = await dbOperation('categories', 'readonly', store => store.getAll());
-        const localTransactions = await dbOperation('transactions', 'readonly', store => store.getAll());
+        // Get ALL local data (including soft-deleted)
+        const localAccountsAll = await dbOperation('accounts', 'readonly', store => store.getAll());
+        const localCategoriesAll = await dbOperation('categories', 'readonly', store => store.getAll());
+        const localTransactionsAll = await dbOperation('transactions', 'readonly', store => store.getAll());
 
         // Get cloud data
         const { data: cloudAccounts } = await state.supabaseClient.from('accounts').select('*');
@@ -135,42 +134,63 @@
         // MERGE ACCOUNTS
         const mergedAccounts = new Map();
         
-        // Add all local accounts
-        for (const acc of localAccounts) {
+        for (const acc of localAccountsAll) {
           mergedAccounts.set(acc.id, {
             id: acc.id,
             name: acc.name,
             initial_balance: acc.initialBalance,
             created_at: acc.createdAt,
+            deleted: acc.deleted || false,
+            deleted_at: acc.deleted_at || null,
+            updated_at: acc.updated_at || acc.createdAt,
             source: 'local'
           });
         }
         
-        // Merge with cloud accounts (keep most recent or add new)
         for (const acc of (cloudAccounts || [])) {
           const local = mergedAccounts.get(acc.id);
           if (!local) {
-            // New from cloud, add it
             mergedAccounts.set(acc.id, {
               id: acc.id,
               name: acc.name,
               initial_balance: acc.initial_balance,
               created_at: acc.created_at,
+              deleted: acc.deleted || false,
+              deleted_at: acc.deleted_at || null,
+              updated_at: acc.updated_at || acc.created_at,
               source: 'cloud'
             });
+          } else {
+            // Compare updated_at
+            const localDate = new Date(local.updated_at);
+            const cloudDate = new Date(acc.updated_at || acc.created_at);
+            if (cloudDate > localDate) {
+              mergedAccounts.set(acc.id, {
+                id: acc.id,
+                name: acc.name,
+                initial_balance: acc.initial_balance,
+                created_at: acc.created_at,
+                deleted: acc.deleted || false,
+                deleted_at: acc.deleted_at || null,
+                updated_at: acc.updated_at || acc.created_at,
+                source: 'cloud-newer'
+              });
+            }
           }
-          // If exists locally, keep local version (local is source of truth)
         }
 
         // MERGE CATEGORIES
         const mergedCategories = new Map();
         
-        for (const cat of localCategories) {
+        for (const cat of localCategoriesAll) {
           mergedCategories.set(cat.id, {
             id: cat.id,
             name: cat.name,
             color: cat.color,
             created_at: cat.createdAt,
+            deleted: cat.deleted || false,
+            deleted_at: cat.deleted_at || null,
+            updated_at: cat.updated_at || cat.createdAt,
             source: 'local'
           });
         }
@@ -183,15 +203,33 @@
               name: cat.name,
               color: cat.color,
               created_at: cat.created_at,
+              deleted: cat.deleted || false,
+              deleted_at: cat.deleted_at || null,
+              updated_at: cat.updated_at || cat.created_at,
               source: 'cloud'
             });
+          } else {
+            const localDate = new Date(local.updated_at);
+            const cloudDate = new Date(cat.updated_at || cat.created_at);
+            if (cloudDate > localDate) {
+              mergedCategories.set(cat.id, {
+                id: cat.id,
+                name: cat.name,
+                color: cat.color,
+                created_at: cat.created_at,
+                deleted: cat.deleted || false,
+                deleted_at: cat.deleted_at || null,
+                updated_at: cat.updated_at || cat.created_at,
+                source: 'cloud-newer'
+              });
+            }
           }
         }
 
-        // MERGE TRANSACTIONS (with updated_at comparison)
+        // MERGE TRANSACTIONS
         const mergedTransactions = new Map();
         
-        for (const tx of localTransactions) {
+        for (const tx of localTransactionsAll) {
           mergedTransactions.set(tx.id, {
             id: tx.id,
             description: tx.description,
@@ -202,7 +240,9 @@
             date: tx.date,
             hidden: tx.hidden,
             created_at: tx.createdAt,
-            updated_at: tx.updatedAt,
+            updated_at: tx.updatedAt || tx.createdAt,
+            deleted: tx.deleted || false,
+            deleted_at: tx.deleted_at || null,
             source: 'local'
           });
         }
@@ -210,7 +250,6 @@
         for (const tx of (cloudTransactions || [])) {
           const local = mergedTransactions.get(tx.id);
           if (!local) {
-            // New from cloud
             mergedTransactions.set(tx.id, {
               id: tx.id,
               description: tx.description,
@@ -221,16 +260,15 @@
               date: tx.date,
               hidden: tx.hidden,
               created_at: tx.created_at,
-              updated_at: tx.updated_at,
+              updated_at: tx.updated_at || tx.created_at,
+              deleted: tx.deleted || false,
+              deleted_at: tx.deleted_at || null,
               source: 'cloud'
             });
           } else {
-            // Exists in both - compare updated_at
-            const localDate = new Date(local.updated_at || local.created_at);
+            const localDate = new Date(local.updated_at);
             const cloudDate = new Date(tx.updated_at || tx.created_at);
-            
             if (cloudDate > localDate) {
-              // Cloud is newer, use cloud version
               mergedTransactions.set(tx.id, {
                 id: tx.id,
                 description: tx.description,
@@ -241,21 +279,25 @@
                 date: tx.date,
                 hidden: tx.hidden,
                 created_at: tx.created_at,
-                updated_at: tx.updated_at,
+                updated_at: tx.updated_at || tx.created_at,
+                deleted: tx.deleted || false,
+                deleted_at: tx.deleted_at || null,
                 source: 'cloud-newer'
               });
             }
-            // else: local is newer or same, keep local
           }
         }
 
-        // SAVE MERGED DATA TO CLOUD
+        // SAVE TO CLOUD
         for (const acc of mergedAccounts.values()) {
           await state.supabaseClient.from('accounts').upsert({
             id: acc.id,
             name: acc.name,
             initial_balance: acc.initial_balance,
-            created_at: acc.created_at
+            created_at: acc.created_at,
+            deleted: acc.deleted,
+            deleted_at: acc.deleted_at,
+            updated_at: acc.updated_at
           });
         }
 
@@ -264,7 +306,10 @@
             id: cat.id,
             name: cat.name,
             color: cat.color,
-            created_at: cat.created_at
+            created_at: cat.created_at,
+            deleted: cat.deleted,
+            deleted_at: cat.deleted_at,
+            updated_at: cat.updated_at
           });
         }
 
@@ -279,40 +324,23 @@
             date: tx.date,
             hidden: tx.hidden,
             created_at: tx.created_at,
-            updated_at: tx.updated_at
+            updated_at: tx.updated_at,
+            deleted: tx.deleted,
+            deleted_at: tx.deleted_at
           });
         }
 
-        // Delete from cloud what's not in merged (deleted locally)
-        const mergedAccountIds = new Set(mergedAccounts.keys());
-        for (const acc of (cloudAccounts || [])) {
-          if (!mergedAccountIds.has(acc.id)) {
-            await state.supabaseClient.from('accounts').delete().eq('id', acc.id);
-          }
-        }
-
-        const mergedCategoryIds = new Set(mergedCategories.keys());
-        for (const cat of (cloudCategories || [])) {
-          if (!mergedCategoryIds.has(cat.id)) {
-            await state.supabaseClient.from('categories').delete().eq('id', cat.id);
-          }
-        }
-
-        const mergedTxIds = new Set(mergedTransactions.keys());
-        for (const tx of (cloudTransactions || [])) {
-          if (!mergedTxIds.has(tx.id)) {
-            await state.supabaseClient.from('transactions').delete().eq('id', tx.id);
-          }
-        }
-
-        // SAVE MERGED DATA TO LOCAL (update with cloud changes)
+        // SAVE TO LOCAL (update with cloud changes)
         for (const acc of mergedAccounts.values()) {
           if (acc.source === 'cloud' || acc.source === 'cloud-newer') {
             await dbOperation('accounts', 'readwrite', store => store.put({
               id: acc.id,
               name: acc.name,
               initialBalance: acc.initial_balance,
-              createdAt: acc.created_at
+              createdAt: acc.created_at,
+              deleted: acc.deleted,
+              deleted_at: acc.deleted_at,
+              updated_at: acc.updated_at
             }));
           }
         }
@@ -323,7 +351,10 @@
               id: cat.id,
               name: cat.name,
               color: cat.color,
-              createdAt: cat.created_at
+              createdAt: cat.created_at,
+              deleted: cat.deleted,
+              deleted_at: cat.deleted_at,
+              updated_at: cat.updated_at
             }));
           }
         }
@@ -340,7 +371,9 @@
               date: tx.date,
               hidden: tx.hidden,
               createdAt: tx.created_at,
-              updatedAt: tx.updated_at
+              updatedAt: tx.updated_at,
+              deleted: tx.deleted,
+              deleted_at: tx.deleted_at
             }));
           }
         }
@@ -370,9 +403,12 @@
       const accs = await dbOperation('accounts', 'readonly', store => store.getAll());
       const cats = await dbOperation('categories', 'readonly', store => store.getAll());
       const txs = await dbOperation('transactions', 'readonly', store => store.getAll());
-      state.accounts = accs || [];
-      state.categories = cats || [];
-      state.transactions = txs || [];
+      
+      // Filter out soft-deleted items
+      state.accounts = (accs || []).filter(a => !a.deleted);
+      state.categories = (cats || []).filter(c => !c.deleted);
+      state.transactions = (txs || []).filter(t => !t.deleted);
+      
       render();
     }
 
@@ -458,7 +494,16 @@
 
     async function deleteItem(storeName, id) {
       if (!confirm('Eliminare questo elemento?')) return;
-      await dbOperation(storeName, 'readwrite', store => store.delete(id));
+      
+      // Soft delete: mark as deleted instead of removing
+      const item = await dbOperation(storeName, 'readonly', store => store.get(id));
+      if (item) {
+        item.deleted = true;
+        item.deleted_at = new Date().toISOString();
+        item.updated_at = new Date().toISOString();
+        await dbOperation(storeName, 'readwrite', store => store.put(item));
+      }
+      
       await loadData();
       if (state.supabaseClient && navigator.onLine) {
         await syncBidirectional();
