@@ -26,9 +26,8 @@
 
     const { createClient } = supabase;
     const DB_NAME = 'FinTrackDB';
-    const DB_VERSION = 2; // Changed for UUID upgrade
+    const DB_VERSION = 2;
 
-    // UUID generator (RFC4122 v4)
     function generateUUID() {
       return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
         const r = Math.random() * 16 | 0;
@@ -531,13 +530,19 @@
       }
     }
 
-    async function toggleHidden(tx) {
-      await dbOperation('transactions', 'readwrite', store => store.put({...tx, hidden: !tx.hidden}));
-      await loadData();
-      if (state.supabaseClient && navigator.onLine) {
-        await syncBidirectional();
-      } else if (!navigator.onLine) {
-        showNotification('💾 Modificato in locale (sync al prossimo online)');
+    async function toggleHidden(id) {
+      const tx = await dbOperation('transactions', 'readonly', store => store.get(id));
+      if (tx) {
+        tx.hidden = !tx.hidden;
+        tx.updatedAt = new Date().toISOString();
+        tx.updated_at = tx.updatedAt;
+        await dbOperation('transactions', 'readwrite', store => store.put(tx));
+        await loadData();
+        if (state.supabaseClient && navigator.onLine) {
+          await syncBidirectional();
+        } else if (!navigator.onLine) {
+          showNotification('💾 Modificato in locale (sync al prossimo online)');
+        }
       }
     }
 
@@ -613,8 +618,19 @@
       return result;
     }
 
-    function openModal(type, item = null) {
+    function openModal(type, itemId = null) {
       state.currentModal = type;
+      if (itemId && typeof itemId === 'string') {
+        if (type === 'transaction' || type === 'duplicate') {
+          state.editingItem = state.transactions.find(t => t.id === itemId);
+        } else {
+          state.editingItem = null;
+        }
+      } else {
+        state.editingItem = itemId;
+      }
+      render();
+    }
       state.editingItem = item;
       render();
     }
@@ -763,10 +779,10 @@
                     </div>
                   </div>
                   <div class="flex gap-1 text-xs">
-                    <button onclick='openModal("transaction", ${JSON.stringify(tx).replace(/'/g, "&#39;")})' class="flex-1 p-1.5 bg-gray-600 hover:bg-gray-500 rounded">✏️</button>
-                    <button onclick='openModal("duplicate", ${JSON.stringify(tx).replace(/'/g, "&#39;")})' class="flex-1 p-1.5 bg-gray-600 hover:bg-gray-500 rounded">📋</button>
-                    <button onclick='toggleHidden(${JSON.stringify(tx).replace(/'/g, "&#39;")})' class="flex-1 p-1.5 bg-gray-600 hover:bg-gray-500 rounded">👁️</button>
-                    <button onclick="deleteItem('transactions', ${tx.id})" class="flex-1 p-1.5 bg-red-600 hover:bg-red-700 rounded">🗑️</button>
+                    <button onclick='openModal("transaction", "${tx.id}")' class="flex-1 p-1.5 bg-gray-600 hover:bg-gray-500 rounded">✏️</button>
+                    <button onclick='openModal("duplicate", "${tx.id}")' class="flex-1 p-1.5 bg-gray-600 hover:bg-gray-500 rounded">📋</button>
+                    <button onclick="toggleHidden('${tx.id}')" class="flex-1 p-1.5 bg-gray-600 hover:bg-gray-500 rounded">👁️</button>
+                    <button onclick="deleteItem('transactions', '${tx.id}')" class="flex-1 p-1.5 bg-red-600 hover:bg-red-700 rounded">🗑️</button>
                   </div>
                 </div>
               `;
@@ -785,7 +801,7 @@
                 <div class="font-bold">${acc.name}</div>
                 <div class="text-sm text-gray-400">Saldo iniziale: ${acc.initialBalance}€</div>
               </div>
-              <button onclick="deleteItem('accounts', ${acc.id})" class="p-2 bg-red-600 hover:bg-red-700 rounded">🗑️</button>
+              <button onclick="deleteItem('accounts', '${acc.id}')" class="p-2 bg-red-600 hover:bg-red-700 rounded">🗑️</button>
             </div>
           `).join('')}
           ${state.accounts.length === 0 ? '<p class="text-gray-400 text-center py-8">Nessun conto</p>' : ''}
@@ -801,7 +817,7 @@
                 <div class="w-4 h-4 rounded" style="background-color:${cat.color}"></div>
                 <span class="font-bold">${cat.name}</span>
               </div>
-              <button onclick="deleteItem('categories', ${cat.id})" class="p-2 bg-red-600 hover:bg-red-700 rounded">🗑️</button>
+              <button onclick="deleteItem('categories', '${cat.id}')" class="p-2 bg-red-600 hover:bg-red-700 rounded">🗑️</button>
             </div>
           `).join('')}
           ${state.categories.length === 0 ? '<p class="text-gray-400 text-center py-8">Nessuna categoria</p>' : ''}
@@ -838,9 +854,9 @@
                     </div>
                   </div>
                   <div class="flex gap-1 text-xs">
-                    <button onclick='openModal("transaction", ${JSON.stringify(tx).replace(/'/g, "&#39;")})' class="flex-1 p-1.5 bg-gray-600 rounded">✏️</button>
-                    <button onclick='toggleHidden(${JSON.stringify(tx).replace(/'/g, "&#39;")})' class="flex-1 p-1.5 bg-gray-600 rounded">👁️ Mostra</button>
-                    <button onclick="deleteItem('transactions', ${tx.id})" class="flex-1 p-1.5 bg-red-600 rounded">🗑️</button>
+                    <button onclick='openModal("transaction", "${tx.id}")' class="flex-1 p-1.5 bg-gray-600 rounded">✏️</button>
+                    <button onclick="toggleHidden('${tx.id}')" class="flex-1 p-1.5 bg-gray-600 rounded">👁️ Mostra</button>
+                    <button onclick="deleteItem('transactions', '${tx.id}')" class="flex-1 p-1.5 bg-red-600 rounded">🗑️</button>
                   </div>
                 </div>
               `;
@@ -911,7 +927,7 @@
                 <span class="text-sm">Nascondi dalle analisi</span>
               </label>
               <div class="flex gap-2">
-                <button onclick="saveTransaction({description: document.getElementById('tx-desc').value, accountId: document.getElementById('tx-acc').value, categoryId: document.getElementById('tx-cat').value, type: document.getElementById('tx-type').value, amount: parseFloat(document.getElementById('tx-amount').value), date: document.getElementById('tx-date').value, hidden: document.getElementById('tx-hidden').checked, createdAt: '${editing?.createdAt || new Date().toISOString()}', updatedAt: new Date().toISOString()})" class="flex-1 bg-blue-600 hover:bg-blue-700 rounded p-2 font-bold">Salva</button>
+                <button onclick="saveTransaction({description: document.getElementById('tx-desc').value, accountId: document.getElementById('tx-acc').value, categoryId: parseInt(document.getElementById('tx-cat').value), type: document.getElementById('tx-type').value, amount: parseFloat(document.getElementById('tx-amount').value), date: document.getElementById('tx-date').value, hidden: document.getElementById('tx-hidden').checked, createdAt: '${editing?.createdAt || new Date().toISOString()}', updatedAt: new Date().toISOString()})" class="flex-1 bg-blue-600 hover:bg-blue-700 rounded p-2 font-bold">Salva</button>
                 <button onclick="closeModal()" class="flex-1 bg-gray-700 hover:bg-gray-600 rounded p-2">Annulla</button>
               </div>
             </div>
